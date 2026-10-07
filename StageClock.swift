@@ -1,7 +1,14 @@
 // Stage Clock — a giant, click-through countdown overlay for live talks.
 // Menu bar app (no Dock icon). Build: ./build.sh
+//
+// The digits are drawn as vector glyph outlines (Core Text paths), not through a text field:
+// figures sit in fixed-width cells so nothing shifts as they change, the colon and plus are
+// optically centred on the figure height, the baseline is snapped to the pixel grid, and the
+// halo is a crisp round-joined stroke laid UNDER the fill (the cartographic halo) — never a
+// blurred shadow, which is what made v1.0 look fuzzy.
 import Cocoa
 import Carbon.HIToolbox
+import CoreText
 
 // MARK: - Settings
 
@@ -10,25 +17,66 @@ enum Corner: Int, CaseIterable {
     var title: String { ["Top right", "Top left", "Bottom right", "Bottom left"][rawValue] }
 }
 
-enum TextColor: Int, CaseIterable {
-    case red, yellow, white, green
-    var title: String { ["Red", "Yellow", "White", "Green"][rawValue] }
-    var color: NSColor {
-        switch self {
-        case .red: return NSColor(calibratedRed: 1.0, green: 0.12, blue: 0.10, alpha: 1)
-        case .yellow: return NSColor(calibratedRed: 1.0, green: 0.86, blue: 0.0, alpha: 1)
-        case .white: return .white
-        case .green: return NSColor(calibratedRed: 0.2, green: 1.0, blue: 0.35, alpha: 1)
-        }
+enum Halo: Int, CaseIterable {
+    case none, fine, medium, bold
+    var title: String { ["None", "Fine", "Medium", "Bold"][rawValue] }
+    /// Visible halo width outside the glyph outline, as a fraction of the font size.
+    var fraction: CGFloat { [0, 0.018, 0.03, 0.045][rawValue] }
+}
+
+let haloColor = CGColor(srgbRed: 0.04, green: 0.04, blue: 0.05, alpha: 0.9)
+
+let systemFamilies: [(name: String, design: NSFontDescriptor.SystemDesign)] = [
+    ("SF Pro", .default), ("SF Pro Rounded", .rounded), ("SF Mono", .monospaced), ("New York", .serif),
+]
+let systemWeights: [(name: String, weight: NSFont.Weight)] = [
+    ("Light", .light), ("Regular", .regular), ("Medium", .medium), ("Semibold", .semibold),
+    ("Bold", .bold), ("Heavy", .heavy), ("Black", .black),
+]
+
+func styles(ofFamily family: String) -> [String] {
+    if systemFamilies.contains(where: { $0.name == family }) { return systemWeights.map(\.name) }
+    return (NSFontManager.shared.availableMembers(ofFontFamily: family) ?? []).compactMap { $0[1] as? String }
+}
+
+func isInstalled(family: String) -> Bool {
+    systemFamilies.contains(where: { $0.name == family }) || NSFontManager.shared.availableFontFamilies.contains(family)
+}
+
+func makeFont(family: String, style: String, size: CGFloat) -> NSFont {
+    if let sys = systemFamilies.first(where: { $0.name == family }) {
+        let weight = systemWeights.first(where: { $0.name == style })?.weight ?? .bold
+        let base = NSFont.systemFont(ofSize: size, weight: weight)
+        if let d = base.fontDescriptor.withDesign(sys.design), let f = NSFont(descriptor: d, size: size) { return f }
+        return base
     }
+    let members = NSFontManager.shared.availableMembers(ofFontFamily: family) ?? []
+    if let m = members.first(where: { ($0[1] as? String) == style }) ?? members.first,
+       let ps = m[0] as? String, let f = NSFont(name: ps, size: size) { return f }
+    return NSFont.systemFont(ofSize: size, weight: .bold)
+}
+
+func color(hex: String) -> NSColor? {
+    guard hex.count == 6, let v = Int(hex, radix: 16) else { return nil }
+    return NSColor(srgbRed: CGFloat((v >> 16) & 255) / 255, green: CGFloat((v >> 8) & 255) / 255,
+                   blue: CGFloat(v & 255) / 255, alpha: 1)
+}
+
+func hex(of c: NSColor) -> String? {
+    guard let s = c.usingColorSpace(.sRGB) else { return nil }
+    func b(_ v: CGFloat) -> Int { Int((min(max(v, 0), 1) * 255).rounded()) }
+    return String(format: "%02X%02X%02X", b(s.redComponent), b(s.greenComponent), b(s.blueComponent))
 }
 
 struct Prefs {
     static let d = UserDefaults.standard
+    /// Bumped on every settings change so the overlay knows to re-render.
+    static var stamp = 0
     static func register() {
         d.register(defaults: [
             "minutes": 30, "startAtTime": false, "startMinuteOfDay": 9 * 60,
-            "corner": Corner.topRight.rawValue, "color": TextColor.red.rawValue,
+            "corner": Corner.topRight.rawValue, "textColorHex": "FF3B30",
+            "fontFamily": "SF Pro", "fontStyle": "Bold", "halo": Halo.fine.rawValue,
             "fontSize": 160.0, "backing": false, "chime": true, "displayID": 0,
         ])
     }
@@ -36,7 +84,13 @@ struct Prefs {
     static var startAtTime: Bool { get { d.bool(forKey: "startAtTime") } set { d.set(newValue, forKey: "startAtTime") } }
     static var startMinuteOfDay: Int { get { d.integer(forKey: "startMinuteOfDay") } set { d.set(newValue, forKey: "startMinuteOfDay") } }
     static var corner: Corner { get { Corner(rawValue: d.integer(forKey: "corner")) ?? .topRight } set { d.set(newValue.rawValue, forKey: "corner") } }
-    static var color: TextColor { get { TextColor(rawValue: d.integer(forKey: "color")) ?? .red } set { d.set(newValue.rawValue, forKey: "color") } }
+    static var textColor: NSColor {
+        get { color(hex: d.string(forKey: "textColorHex") ?? "") ?? color(hex: "FF3B30")! }
+        set { if let h = hex(of: newValue) { d.set(h, forKey: "textColorHex") } }
+    }
+    static var fontFamily: String { get { d.string(forKey: "fontFamily") ?? "SF Pro" } set { d.set(newValue, forKey: "fontFamily") } }
+    static var fontStyle: String { get { d.string(forKey: "fontStyle") ?? "Bold" } set { d.set(newValue, forKey: "fontStyle") } }
+    static var halo: Halo { get { Halo(rawValue: d.integer(forKey: "halo")) ?? .fine } set { d.set(newValue.rawValue, forKey: "halo") } }
     static var fontSize: CGFloat { get { CGFloat(d.double(forKey: "fontSize")) } set { d.set(Double(newValue), forKey: "fontSize") } }
     static var backing: Bool { get { d.bool(forKey: "backing") } set { d.set(newValue, forKey: "backing") } }
     static var chime: Bool { get { d.bool(forKey: "chime") } set { d.set(newValue, forKey: "chime") } }
@@ -57,11 +111,117 @@ func formatClock(_ secs: Int) -> String {
     return h > 0 ? String(format: "%d:%02d:%02d", h, m, sec) : String(format: "%d:%02d", m, sec)
 }
 
+// MARK: - Clock artwork (vector glyph outlines)
+
+struct ClockArt {
+    let path: CGPath
+    let width: CGFloat      // total advance: figures in fixed cells, so it only changes with the pattern
+    let minY: CGFloat       // figure ink extent, relative to the baseline
+    let maxY: CGFloat
+    var height: CGFloat { maxY - minY }
+
+    init(_ text: String, font: NSFont) {
+        let ct = font as CTFont
+        func glyph(_ c: Character) -> CGGlyph {
+            var units = Array(String(c).utf16)
+            var glyphs = [CGGlyph](repeating: 0, count: units.count)
+            CTFontGetGlyphsForCharacters(ct, &units, &glyphs, units.count)
+            return glyphs[0]
+        }
+        func advance(_ g: CGGlyph) -> CGFloat {
+            var g = g, a = CGSize.zero
+            CTFontGetAdvancesForGlyphs(ct, .horizontal, &g, &a, 1)
+            return a.width
+        }
+        func bounds(_ g: CGGlyph) -> CGRect {
+            var g = g, r = CGRect.zero
+            CTFontGetBoundingRectsForGlyphs(ct, .horizontal, &g, &r, 1)
+            return r
+        }
+        let figures = "0123456789".map(glyph)
+        let cell = figures.map(advance).max() ?? font.pointSize * 0.6
+        let figBox = figures.map(bounds).reduce(CGRect.null) { $0.union($1) }
+        minY = figBox.minY
+        maxY = figBox.maxY
+        let p = CGMutablePath()
+        var x: CGFloat = 0
+        for c in text {
+            let g = glyph(c)
+            var t: CGAffineTransform
+            if c.isNumber {
+                // Tabular by construction: every figure centred in the widest figure's cell.
+                t = CGAffineTransform(translationX: x + (cell - advance(g)) / 2, y: 0)
+                x += cell
+            } else {
+                // ':' and '+' sit on the x-height / maths axis in most faces; lift them to the figure centre.
+                t = CGAffineTransform(translationX: x, y: figBox.midY - bounds(g).midY)
+                x += advance(g)
+            }
+            if let gp = CTFontCreatePathForGlyph(ct, g, &t) { p.addPath(gp) }
+        }
+        path = p
+        width = x
+    }
+
+    /// `baseline` is where the text baseline starts; snap it to the pixel grid before calling.
+    func draw(in ctx: CGContext, baseline: CGPoint, color: CGColor, halo: CGFloat) {
+        ctx.saveGState()
+        ctx.translateBy(x: baseline.x, y: baseline.y)
+        if halo > 0 {
+            ctx.addPath(path)
+            ctx.setLineWidth(halo * 2)        // the inner half is covered by the fill
+            ctx.setLineJoin(.round)
+            ctx.setLineCap(.round)
+            ctx.setStrokeColor(haloColor)
+            ctx.strokePath()
+        }
+        ctx.addPath(path)
+        ctx.setFillColor(color)
+        ctx.fillPath()                         // non-zero winding: overlapping contours stay solid
+        ctx.restoreGState()
+    }
+}
+
+/// Lays the clock out in a box: returns the box size and the (pixel-snapped) baseline origin.
+func layoutClock(_ art: ClockArt, size: CGFloat, halo: CGFloat, plate: Bool, scale: CGFloat) -> (CGSize, CGPoint) {
+    func snap(_ v: CGFloat) -> CGFloat { (v * scale).rounded() / scale }
+    let padX = plate ? size * 0.2 : ceil(halo) + 2
+    let padY = plate ? size * 0.14 : ceil(halo) + 2
+    let box = CGSize(width: ceil(art.width + padX * 2), height: ceil(art.height + padY * 2))
+    let baseline = CGPoint(x: snap((box.width - art.width) / 2), y: snap((box.height - art.height) / 2 - art.minY))
+    return (box, baseline)
+}
+
+func drawPlate(in ctx: CGContext, rect: CGRect, size: CGFloat) {
+    let r = size * 0.14
+    ctx.addPath(CGPath(roundedRect: rect, cornerWidth: r, cornerHeight: r, transform: nil))
+    ctx.setFillColor(CGColor(srgbRed: 0, green: 0, blue: 0, alpha: 0.6))
+    ctx.fillPath()
+}
+
 // MARK: - Overlay window
 
+final class ClockView: NSView {
+    var art: ClockArt?
+    var baseline = CGPoint.zero
+    var fill = NSColor.red.cgColor
+    var halo: CGFloat = 0
+    var plate = false
+    var fontSize: CGFloat = 160
+    override var isOpaque: Bool { false }
+
+    override func draw(_ dirtyRect: NSRect) {
+        guard let ctx = NSGraphicsContext.current?.cgContext, let art = art else { return }
+        ctx.clear(bounds)
+        if plate { drawPlate(in: ctx, rect: bounds, size: fontSize) }
+        art.draw(in: ctx, baseline: baseline, color: fill, halo: halo)
+    }
+}
+
 final class OverlayWindow: NSPanel {
-    private let label = NSTextField(labelWithString: "")
-    private let plate = NSView()
+    let clock = ClockView()
+    private var lastKey = ""
+    private var pulsePeriod: Double?
 
     init() {
         super.init(contentRect: NSRect(x: 0, y: 0, width: 10, height: 10),
@@ -75,57 +235,62 @@ final class OverlayWindow: NSPanel {
         // Above full-screen apps, Keynote/PowerPoint slideshows and screen savers.
         level = NSWindow.Level(rawValue: Int(CGShieldingWindowLevel()) + 1)
         collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary, .stationary, .ignoresCycle]
-        let cv = NSView()
-        cv.wantsLayer = true
-        contentView = cv
-        plate.wantsLayer = true
-        plate.layer?.backgroundColor = NSColor.black.withAlphaComponent(0.55).cgColor
-        cv.addSubview(plate)
-        label.lineBreakMode = .byClipping
-        label.alignment = .center
-        cv.addSubview(label)
+        clock.wantsLayer = true
+        clock.layerContentsRedrawPolicy = .onSetNeedsDisplay
+        contentView = clock
     }
 
     override var canBecomeKey: Bool { false }
     override var canBecomeMain: Bool { false }
 
-    func render(_ text: String, alpha: CGFloat) {
+    func render(_ text: String) {
+        let key = "\(text)|\(Prefs.stamp)"
+        guard key != lastKey else { return }
+        lastKey = key
+        let screen = chosenScreen()
         let size = Prefs.fontSize
-        let font = NSFont.monospacedDigitSystemFont(ofSize: size, weight: .heavy)
-        let shadow = NSShadow()
-        shadow.shadowColor = NSColor.black.withAlphaComponent(0.9)
-        shadow.shadowBlurRadius = size * 0.06
-        shadow.shadowOffset = .zero
-        let attr = NSAttributedString(string: text, attributes: [
-            .font: font,
-            .foregroundColor: Prefs.color.color.withAlphaComponent(alpha),
-            .strokeColor: NSColor.black.withAlphaComponent(max(alpha, 0.6)),
-            .strokeWidth: -3.0,          // negative = fill AND outline, readable on any background
-            .shadow: shadow,
-        ])
-        label.attributedStringValue = attr
-        // Measure the string itself (+ room for outline and glow); NSTextField's intrinsic size clips it.
-        let raw = attr.size()
-        let textSize = NSSize(width: ceil(raw.width + size * 0.12), height: ceil(raw.height + size * 0.04))
-        let padX = Prefs.backing ? size * 0.18 : size * 0.06
-        let padY = Prefs.backing ? size * 0.06 : size * 0.02
-        let w = ceil(textSize.width + padX * 2), h = ceil(textSize.height + padY * 2)
-        label.frame = NSRect(x: padX, y: padY, width: textSize.width, height: textSize.height)
-        plate.isHidden = !Prefs.backing
-        plate.frame = NSRect(x: 0, y: 0, width: w, height: h)
-        plate.layer?.cornerRadius = size * 0.12
+        let art = ClockArt(text, font: makeFont(family: Prefs.fontFamily, style: Prefs.fontStyle, size: size))
+        let halo = Prefs.halo.fraction * size
+        let (box, baseline) = layoutClock(art, size: size, halo: halo, plate: Prefs.backing,
+                                          scale: screen.backingScaleFactor)
+        clock.art = art
+        clock.baseline = baseline
+        clock.fill = Prefs.textColor.cgColor
+        clock.halo = halo
+        clock.plate = Prefs.backing
+        clock.fontSize = size
 
-        let vf = chosenScreen().visibleFrame
-        let margin: CGFloat = 24
-        var origin = NSPoint.zero
+        let vf = screen.visibleFrame
+        let m = max(16, (size * 0.15).rounded())
+        let o: NSPoint
         switch Prefs.corner {
-        case .topRight: origin = NSPoint(x: vf.maxX - w - margin, y: vf.maxY - h - margin)
-        case .topLeft: origin = NSPoint(x: vf.minX + margin, y: vf.maxY - h - margin)
-        case .bottomRight: origin = NSPoint(x: vf.maxX - w - margin, y: vf.minY + margin)
-        case .bottomLeft: origin = NSPoint(x: vf.minX + margin, y: vf.minY + margin)
+        case .topRight: o = NSPoint(x: vf.maxX - box.width - m, y: vf.maxY - box.height - m)
+        case .topLeft: o = NSPoint(x: vf.minX + m, y: vf.maxY - box.height - m)
+        case .bottomRight: o = NSPoint(x: vf.maxX - box.width - m, y: vf.minY + m)
+        case .bottomLeft: o = NSPoint(x: vf.minX + m, y: vf.minY + m)
         }
-        let f = NSRect(origin: origin, size: NSSize(width: w, height: h))
-        if f != frame { setFrame(f, display: true) }
+        // Whole points = whole pixels at 1x and 2x, so the backing store is never resampled.
+        let f = NSRect(x: o.x.rounded(), y: o.y.rounded(), width: box.width, height: box.height)
+        if f != frame { setFrame(f, display: false) }
+        clock.needsDisplay = true
+    }
+
+    /// Static opacity, plus an optional smooth pulse (Core Animation, so it runs at display rate).
+    func setLook(alpha: CGFloat, pulse: Double?) {
+        if clock.alphaValue != alpha { clock.alphaValue = alpha }
+        guard pulse != pulsePeriod, let layer = clock.layer else { return }
+        pulsePeriod = pulse
+        layer.removeAnimation(forKey: "pulse")
+        if let p = pulse {
+            let a = CABasicAnimation(keyPath: "opacity")
+            a.fromValue = 1.0
+            a.toValue = 0.25
+            a.duration = p / 2
+            a.autoreverses = true
+            a.repeatCount = .infinity
+            a.timingFunction = CAMediaTimingFunction(name: .easeInEaseOut)
+            layer.add(a, forKey: "pulse")
+        }
     }
 }
 
@@ -173,6 +338,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWind
 
     func applicationDidFinishLaunching(_ n: Notification) {
         Prefs.register()
+        let args = ProcessInfo.processInfo.arguments
+        if let i = args.firstIndex(of: "--specimen"), i + 1 < args.count {
+            renderSpecimen(to: args[i + 1])
+            exit(0)
+        }
         statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
         statusItem.button?.font = NSFont.monospacedDigitSystemFont(ofSize: 13, weight: .semibold)
         let menu = NSMenu()
@@ -188,12 +358,20 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWind
         ])
 
         NotificationCenter.default.addObserver(forName: NSApplication.didChangeScreenParametersNotification,
-                                               object: nil, queue: .main) { [weak self] _ in self?.tick() }
+                                               object: nil, queue: .main) { [weak self] _ in
+            Prefs.stamp += 1
+            self?.tick()
+        }
         ticker = Timer(timeInterval: 0.1, repeats: true) { [weak self] _ in self?.tick() }
         RunLoop.main.add(ticker!, forMode: .common)
 
-        let args = ProcessInfo.processInfo.arguments
-        if args.contains("--start-now") { start(atTime: false) } else { openSettings() }
+        if let i = args.firstIndex(of: "--test-seconds"), i + 1 < args.count, let s = Double(args[i + 1]) {
+            state = .running(end: Date().addingTimeInterval(s))
+        } else if args.contains("--start-now") {
+            start(atTime: false)
+        } else {
+            openSettings()
+        }
         tick()
     }
 
@@ -254,7 +432,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWind
         tick()
     }
 
-    func windowWillClose(_ n: Notification) { DispatchQueue.main.async { self.tick() } }
+    func windowWillClose(_ n: Notification) {
+        if NSColorPanel.sharedColorPanelExists { NSColorPanel.shared.close() }
+        DispatchQueue.main.async { self.tick() }
+    }
 
     var settingsOpen: Bool { settings?.window?.isVisible ?? false }
 
@@ -283,18 +464,19 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWind
         let text = clockText()
         let r = remaining
         var alpha: CGFloat = 1
+        var pulse: Double?
         var show = !hidden
-        let blink = Int(Date().timeIntervalSince1970 * 2) % 2 == 0
         switch state {
-        case .idle: show = show && settingsOpen; alpha = 0.85        // live preview while setting up
+        case .idle: show = show && settingsOpen          // live preview while setting up
         case .scheduled: alpha = 0.45
-        case .paused: alpha = blink ? 1 : 0.35
+        case .paused: pulse = 2.4
         case .running:
-            if r <= 10 { alpha = blink ? 1 : 0.3 }                   // last 10 s and overtime flash
+            if r <= 10 { pulse = 1.0 }                    // last 10 s and overtime
             if r <= 0, !chimed { chimed = true; if Prefs.chime { NSSound(named: "Glass")?.play() } }
         }
         if show {
-            overlay.render(text, alpha: alpha)
+            overlay.render(text)
+            overlay.setLook(alpha: alpha, pulse: pulse)
             if !overlay.isVisible { overlay.orderFrontRegardless() }
         } else if overlay.isVisible {
             overlay.orderOut(nil)
@@ -366,14 +548,17 @@ final class SettingsWindowController: NSWindowController {
     let timePicker = NSDatePicker()
     let displayPopup = NSPopUpButton()
     let cornerPopup = NSPopUpButton()
-    let colorPopup = NSPopUpButton()
+    let familyPopup = NSPopUpButton()
+    let stylePopup = NSPopUpButton()
+    let colorWell = NSColorWell(style: .minimal)
+    let haloPopup = NSPopUpButton()
     let sizeSlider = NSSlider()
     let backingBox = NSButton(checkboxWithTitle: "Dark plate behind the numbers", target: nil, action: nil)
     let chimeBox = NSButton(checkboxWithTitle: "Chime at 0:00", target: nil, action: nil)
 
     init(app: AppDelegate) {
         self.app = app
-        let w = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 440, height: 360),
+        let w = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 460, height: 400),
                          styleMask: [.titled, .closable], backing: .buffered, defer: false)
         w.title = "Stage Clock"
         w.isReleasedWhenClosed = false
@@ -416,14 +601,30 @@ final class SettingsWindowController: NSWindowController {
         cornerPopup.selectItem(at: Prefs.corner.rawValue)
         cornerPopup.target = self; cornerPopup.action = #selector(changed)
 
-        colorPopup.addItems(withTitles: TextColor.allCases.map(\.title))
-        colorPopup.selectItem(at: Prefs.color.rawValue)
-        colorPopup.target = self; colorPopup.action = #selector(changed)
+        for f in systemFamilies { familyPopup.addItem(withTitle: f.name) }
+        familyPopup.menu?.addItem(.separator())
+        for fam in NSFontManager.shared.availableFontFamilies.sorted()
+        where !fam.hasPrefix(".") && !systemFamilies.contains(where: { $0.name == fam }) {
+            familyPopup.addItem(withTitle: fam)
+        }
+        familyPopup.selectItem(withTitle: isInstalled(family: Prefs.fontFamily) ? Prefs.fontFamily : "SF Pro")
+        familyPopup.target = self; familyPopup.action = #selector(familyChanged)
+        familyPopup.widthAnchor.constraint(equalToConstant: 170).isActive = true
+        reloadStyles(preferring: Prefs.fontStyle)
+        stylePopup.target = self; stylePopup.action = #selector(changed)
+        let typeRow = NSStackView(views: [familyPopup, stylePopup])
 
         sizeSlider.minValue = 48; sizeSlider.maxValue = 400
         sizeSlider.doubleValue = Double(Prefs.fontSize)
         sizeSlider.isContinuous = true
         sizeSlider.target = self; sizeSlider.action = #selector(changed)
+
+        colorWell.color = Prefs.textColor
+        colorWell.target = self; colorWell.action = #selector(changed)
+        haloPopup.addItems(withTitles: Halo.allCases.map(\.title))
+        haloPopup.selectItem(at: Prefs.halo.rawValue)
+        haloPopup.target = self; haloPopup.action = #selector(changed)
+        let colorRow = NSStackView(views: [colorWell, NSTextField(labelWithString: "   Halo:"), haloPopup])
 
         backingBox.state = Prefs.backing ? .on : .off
         backingBox.target = self; backingBox.action = #selector(changed)
@@ -435,14 +636,16 @@ final class SettingsWindowController: NSWindowController {
             [label("Start:"), startRow],
             [label("Display:"), displayPopup],
             [label("Corner:"), cornerPopup],
-            [label("Color:"), colorPopup],
+            [label("Typeface:"), typeRow],
             [label("Size:"), sizeSlider],
+            [label("Color:"), colorRow],
             [NSGridCell.emptyContentView, backingBox],
             [NSGridCell.emptyContentView, chimeBox],
         ])
         grid.rowSpacing = 10
         grid.column(at: 0).xPlacement = .trailing
-        sizeSlider.widthAnchor.constraint(equalToConstant: 220).isActive = true
+        grid.rowAlignment = .firstBaseline
+        sizeSlider.widthAnchor.constraint(equalToConstant: 240).isActive = true
 
         let hint = NSTextField(wrappingLabelWithString:
             "Hotkeys work from any app: ⌃⌥⌘S start/pause · ⌃⌥⌘R reset · ⌃⌥⌘H hide · ⌃⌥⌘= / ⌃⌥⌘- add/remove a minute.")
@@ -466,6 +669,17 @@ final class SettingsWindowController: NSWindowController {
         sync()
     }
 
+    func reloadStyles(preferring wanted: String) {
+        let list = styles(ofFamily: familyPopup.titleOfSelectedItem ?? "SF Pro")
+        stylePopup.removeAllItems()
+        stylePopup.addItems(withTitles: list)
+        if list.contains(wanted) { stylePopup.selectItem(withTitle: wanted) }
+        else if let b = list.first(where: { $0 == "Bold" }) ?? list.first(where: { $0.localizedCaseInsensitiveContains("bold") }) {
+            stylePopup.selectItem(withTitle: b)
+        } else { stylePopup.selectItem(at: 0) }
+    }
+
+    @objc func familyChanged() { reloadStyles(preferring: stylePopup.titleOfSelectedItem ?? "Bold"); changed() }
     @objc func stepped() { minutesField.integerValue = minutesStepper.integerValue; changed() }
 
     @objc func changed() {
@@ -476,15 +690,152 @@ final class SettingsWindowController: NSWindowController {
         Prefs.startMinuteOfDay = (comps.hour ?? 0) * 60 + (comps.minute ?? 0)
         if let t = displayPopup.selectedItem?.tag { Prefs.displayID = UInt32(t) }
         Prefs.corner = Corner(rawValue: cornerPopup.indexOfSelectedItem) ?? .topRight
-        Prefs.color = TextColor(rawValue: colorPopup.indexOfSelectedItem) ?? .red
+        Prefs.fontFamily = familyPopup.titleOfSelectedItem ?? "SF Pro"
+        Prefs.fontStyle = stylePopup.titleOfSelectedItem ?? "Bold"
+        Prefs.textColor = colorWell.color
+        Prefs.halo = Halo(rawValue: haloPopup.indexOfSelectedItem) ?? .fine
         Prefs.fontSize = CGFloat(sizeSlider.doubleValue)
         Prefs.backing = backingBox.state == .on
         Prefs.chime = chimeBox.state == .on
+        Prefs.stamp += 1
         sync()
         app?.tick()
     }
 
     func sync() { timePicker.isEnabled = startMode.indexOfSelectedItem == 1 }
+}
+
+// MARK: - Specimen sheet (`StageClock --specimen out.png`): every typeface on three backdrops, 2x
+
+func renderSpecimen(to path: String) {
+    let samples: [(String, String)] = [
+        ("SF Pro", "Bold"), ("SF Pro", "Heavy"), ("SF Pro Rounded", "Bold"), ("SF Mono", "Bold"),
+        ("DIN Alternate", "Bold"), ("Avenir Next", "Bold"), ("Helvetica Neue", "Bold"), ("Futura", "Bold"),
+    ].filter { isInstalled(family: $0.0) }
+    let tileW: CGFloat = 470, tileH: CGFloat = 150, labelW: CGFloat = 190, gap: CGFloat = 14, head: CGFloat = 34
+    let rows = samples.count + 1
+    let W = labelW + 3 * (tileW + gap) + gap
+    let H = head + CGFloat(rows) * (tileH + gap) + gap
+    let scale: CGFloat = 2
+    guard let ctx = CGContext(data: nil, width: Int(W * scale), height: Int(H * scale), bitsPerComponent: 8,
+                              bytesPerRow: 0, space: CGColorSpace(name: CGColorSpace.sRGB)!,
+                              bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue) else { return }
+    ctx.scaleBy(x: scale, y: scale)
+    NSGraphicsContext.saveGraphicsState()
+    NSGraphicsContext.current = NSGraphicsContext(cgContext: ctx, flipped: false)
+    ctx.setFillColor(CGColor(gray: 0.96, alpha: 1))
+    ctx.fill(CGRect(x: 0, y: 0, width: W, height: H))
+    let ink = NSColor(white: 0.15, alpha: 1)
+    ("Stage Clock 1.1 — specimen. Halo: Fine. Columns: dark editor · light editor · map." as NSString)
+        .draw(at: NSPoint(x: gap, y: H - 24), withAttributes: [.font: NSFont.systemFont(ofSize: 14, weight: .semibold), .foregroundColor: ink])
+
+    let size: CGFloat = 84
+    for row in 0..<rows {
+        let y = H - head - CGFloat(row + 1) * (tileH + gap)
+        let name = row == 0 ? "v1.0 (what you saw)" : "\(samples[row - 1].0) \(samples[row - 1].1)"
+        (name as NSString).draw(in: NSRect(x: gap, y: y + tileH / 2 - 20, width: labelW - gap, height: 40),
+                                withAttributes: [.font: NSFont.systemFont(ofSize: 13, weight: .medium), .foregroundColor: ink])
+        for k in 0..<3 {
+            let rect = CGRect(x: labelW + gap + CGFloat(k) * (tileW + gap), y: y, width: tileW, height: tileH)
+            ctx.saveGState()
+            ctx.clip(to: rect)
+            drawBackdrop(k, in: rect, ctx: ctx)
+            let m = (size * 0.15).rounded()
+            if row == 0 {
+                drawOldStyle("24:59", size: size, topRight: CGPoint(x: rect.maxX - m, y: rect.maxY - m))
+            } else {
+                let font = makeFont(family: samples[row - 1].0, style: samples[row - 1].1, size: size)
+                let art = ClockArt("24:59", font: font)
+                let halo = Halo.fine.fraction * size
+                let (box, baseline) = layoutClock(art, size: size, halo: halo, plate: false, scale: scale)
+                let origin = CGPoint(x: rect.maxX - m - box.width, y: rect.maxY - m - box.height)
+                art.draw(in: ctx, baseline: CGPoint(x: origin.x + baseline.x, y: origin.y + baseline.y),
+                         color: color(hex: "FF3B30")!.cgColor, halo: halo)
+            }
+            ctx.restoreGState()
+        }
+    }
+    NSGraphicsContext.restoreGraphicsState()
+    guard let img = ctx.makeImage(),
+          let png = NSBitmapImageRep(cgImage: img).representation(using: .png, properties: [:]) else { return }
+    try? png.write(to: URL(fileURLWithPath: path))
+    print("specimen: \(path) (\(samples.map { "\($0.0) \($0.1)" }.joined(separator: ", ")))")
+}
+
+/// v1.0's styling, for the before/after row: centred black stroke + blurred shadow.
+func drawOldStyle(_ text: String, size: CGFloat, topRight: CGPoint) {
+    let shadow = NSShadow()
+    shadow.shadowColor = NSColor.black.withAlphaComponent(0.9)
+    shadow.shadowBlurRadius = size * 0.06
+    shadow.shadowOffset = .zero
+    let attr = NSAttributedString(string: text, attributes: [
+        .font: NSFont.monospacedDigitSystemFont(ofSize: size, weight: .heavy),
+        .foregroundColor: NSColor(calibratedRed: 1.0, green: 0.12, blue: 0.10, alpha: 1),
+        .strokeColor: NSColor.black, .strokeWidth: -3.0, .shadow: shadow,
+    ])
+    let s = attr.size()
+    attr.draw(at: NSPoint(x: topRight.x - s.width - size * 0.06, y: topRight.y - s.height))
+}
+
+func drawBackdrop(_ kind: Int, in r: CGRect, ctx: CGContext) {
+    func c(_ h: String) -> NSColor { color(hex: h)! }
+    if kind == 2 {
+        // A small OSM-ish map: land, lake, park, minor roads, a primary road, labels.
+        ctx.setFillColor(c("F2EFE9").cgColor); ctx.fill(r)
+        let lake = CGMutablePath()
+        lake.move(to: CGPoint(x: r.minX, y: r.minY))
+        lake.addLine(to: CGPoint(x: r.minX + 120, y: r.minY))
+        lake.addCurve(to: CGPoint(x: r.minX + 150, y: r.maxY), control1: CGPoint(x: r.minX + 175, y: r.minY + 60),
+                      control2: CGPoint(x: r.minX + 95, y: r.minY + 100))
+        lake.addLine(to: CGPoint(x: r.minX, y: r.maxY))
+        lake.closeSubpath()
+        ctx.addPath(lake); ctx.setFillColor(c("AAD3DF").cgColor); ctx.fillPath()
+        ctx.setFillColor(c("CDEBB0").cgColor)
+        ctx.fill(CGRect(x: r.minX + 250, y: r.minY + 12, width: 110, height: 48))
+        func road(_ pts: [CGPoint], casing: String, fill: String, w: CGFloat) {
+            for (col, width) in [(casing, w + 2), (fill, w)] {
+                ctx.beginPath(); ctx.addLines(between: pts)
+                ctx.setStrokeColor(c(col).cgColor); ctx.setLineWidth(width)
+                ctx.setLineCap(.round); ctx.setLineJoin(.round); ctx.strokePath()
+            }
+        }
+        for i in 0..<6 {
+            let x = r.minX + 190 + CGFloat(i) * 52
+            road([CGPoint(x: x, y: r.minY), CGPoint(x: x + 18, y: r.maxY)], casing: "C9C2B8", fill: "FFFFFF", w: 5)
+        }
+        road([CGPoint(x: r.minX + 160, y: r.minY + 34), CGPoint(x: r.maxX, y: r.minY + 30)], casing: "C9C2B8", fill: "FFFFFF", w: 5)
+        road([CGPoint(x: r.minX + 140, y: r.minY + 92), CGPoint(x: r.maxX, y: r.minY + 104)], casing: "C99A55", fill: "FCD6A4", w: 9)
+        let labelAttrs: [NSAttributedString.Key: Any] = [.font: NSFont.systemFont(ofSize: 10, weight: .medium), .foregroundColor: c("4A4A4A")]
+        ("E Genesee St" as NSString).draw(at: NSPoint(x: r.minX + 205, y: r.minY + 92), withAttributes: labelAttrs)
+        ctx.saveGState()
+        ctx.translateBy(x: r.minX + 52, y: r.minY + 30); ctx.rotate(by: .pi / 2.3)
+        ("Skaneateles Lake" as NSString).draw(at: .zero, withAttributes: [
+            .font: NSFontManager.shared.convert(NSFont.systemFont(ofSize: 11), toHaveTrait: .italicFontMask),
+            .foregroundColor: c("3F6E95")])
+        ctx.restoreGState()
+        return
+    }
+    let dark = kind == 0
+    let palette = dark ? ["D4D4D4", "569CD6", "CE9178", "6A9955", "9CDCFE", "DCDCAA"]
+                       : ["1F1F1F", "0000FF", "A31515", "008000", "001080", "795E26"]
+    ctx.setFillColor(c(dark ? "1E1E1E" : "FFFFFF").cgColor); ctx.fill(r)
+    let code: [[(String, Int)]] = [
+        [("import ", 1), ("FeatureLayer ", 4), ("from ", 1), ("\"@arcgis/core/layers/FeatureLayer\"", 2), (";", 0)],
+        [("// symbolize parcels by land-use class", 3)],
+        [("const ", 1), ("parcels ", 4), ("= ", 0), ("new ", 1), ("FeatureLayer", 5), ("({", 0)],
+        [("  url: ", 4), ("\"https://services.arcgis.com/…/Parcels/FeatureServer/0\"", 2), (",", 0)],
+        [("  renderer: ", 4), ("uniqueValues", 5), ("(", 0), ("\"LANDUSE\"", 2), (", palette),", 0)],
+        [("  labelingInfo: ", 4), ("[{ labelExpression: ", 0), ("\"$feature.OWNER\"", 2), (" }]", 0)],
+        [("});", 0)],
+        [("map", 4), (".add(parcels);", 0)],
+        [("await ", 1), ("view", 4), (".goTo(parcels.fullExtent);", 0)],
+    ]
+    let font = NSFont.monospacedSystemFont(ofSize: 11.5, weight: .regular)
+    for (i, line) in code.enumerated() {
+        let s = NSMutableAttributedString()
+        for (text, k) in line { s.append(NSAttributedString(string: text, attributes: [.font: font, .foregroundColor: c(palette[k])])) }
+        s.draw(at: NSPoint(x: r.minX + 14, y: r.maxY - 24 - CGFloat(i) * 15.5))
+    }
 }
 
 // MARK: - main
