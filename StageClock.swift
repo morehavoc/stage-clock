@@ -232,6 +232,7 @@ final class OverlayWindow: NSPanel {
         ignoresMouseEvents = true          // clicks go straight through to whatever is underneath
         isReleasedWhenClosed = false
         hidesOnDeactivate = false
+        canHide = false                    // "Hide Others" in another app must not take the clock with it
         // Above full-screen apps, Keynote/PowerPoint slideshows and screen savers.
         level = NSWindow.Level(rawValue: Int(CGShieldingWindowLevel()) + 1)
         collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary, .stationary, .ignoresCycle]
@@ -343,6 +344,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWind
             renderSpecimen(to: args[i + 1])
             exit(0)
         }
+        // Newest launch wins: an older copy (or another version) still running would draw a second clock.
+        let me = ProcessInfo.processInfo.processIdentifier
+        let others = NSRunningApplication.runningApplications(withBundleIdentifier: Bundle.main.bundleIdentifier ?? "")
+            .filter { $0.processIdentifier != me }
+        others.forEach { $0.terminate() }
+        if !others.isEmpty {
+            DispatchQueue.main.asyncAfter(deadline: .now() + 2) { others.filter { !$0.isTerminated }.forEach { $0.forceTerminate() } }
+        }
         installMainMenu()
         statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
         statusItem.button?.font = NSFont.monospacedDigitSystemFont(ofSize: 13, weight: .semibold)
@@ -376,23 +385,24 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWind
         tick()
     }
 
-    /// Opening the app again (Spotlight, Finder, Launchpad, Dock) while it runs brings the panel back.
-    /// It has no Dock icon, and on a notched MacBook its menu bar item can hide behind the notch.
+    /// Clicking the Dock icon, or opening the app again (Spotlight, Finder, Launchpad), brings the panel back.
+    /// (1.1 was a menu-bar-only app: on a notched MacBook its menu bar item can sit behind the notch.)
     func applicationShouldHandleReopen(_ sender: NSApplication, hasVisibleWindows flag: Bool) -> Bool {
         openSettings()
         return false
     }
 
-    /// Never shown (menu bar app), but it makes ⌘W, ⌘Q and copy/paste work in the panel.
+    /// Standard app menus: Control Panel (⌘,), Quit, ⌘W and copy/paste in the panel.
     func installMainMenu() {
         let main = NSMenu()
         func sub(_ title: String, _ items: [(String, Selector, String)]) {
             let item = NSMenuItem(), menu = NSMenu(title: title)
-            for (t, sel, key) in items { menu.addItem(withTitle: t, action: sel, keyEquivalent: key) }
+            for (t, sel, key) in items { menu.addItem(withTitle: t, action: sel, keyEquivalent: key).target = sel == #selector(openSettings) ? self : nil }
             item.submenu = menu
             main.addItem(item)
         }
-        sub("Stage Clock", [("Quit Stage Clock", #selector(NSApplication.terminate(_:)), "q")])
+        sub("Stage Clock", [("Control Panel…", #selector(openSettings), ","),
+                            ("Quit Stage Clock", #selector(NSApplication.terminate(_:)), "q")])
         sub("Edit", [("Cut", #selector(NSText.cut(_:)), "x"), ("Copy", #selector(NSText.copy(_:)), "c"),
                      ("Paste", #selector(NSText.paste(_:)), "v"), ("Select All", #selector(NSText.selectAll(_:)), "a")])
         sub("Window", [("Close", #selector(NSWindow.performClose(_:)), "w")])
@@ -460,10 +470,20 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWind
 
     @objc func openSettings() {
         if settings == nil { settings = SettingsWindowController(app: self) }
-        settings?.window?.delegate = self
-        NSApp.activate(ignoringOtherApps: true)
-        settings?.showWindow(nil)
-        settings?.window?.makeKeyAndOrderFront(nil)
+        guard let w = settings?.window else { return }
+        w.delegate = self
+        if !w.isVisible {
+            // Open on the display the pointer is on (laptop vs projector), in the upper middle.
+            w.layoutIfNeeded()
+            let mouse = NSEvent.mouseLocation
+            if let vf = (NSScreen.screens.first { NSMouseInRect(mouse, $0.frame, false) } ?? NSScreen.main)?.visibleFrame {
+                w.setFrameOrigin(NSPoint(x: (vf.midX - w.frame.width / 2).rounded(),
+                                         y: (vf.minY + vf.height * 0.6 - w.frame.height / 2).rounded()))
+            }
+        }
+        if #available(macOS 14.0, *) { NSApp.activate() } else { NSApp.activate(ignoringOtherApps: true) }
+        w.makeKeyAndOrderFront(nil)
+        w.orderFrontRegardless()      // even if macOS declines to activate us, the panel comes to the front
         tick()
     }
 
@@ -597,8 +617,10 @@ final class SettingsWindowController: NSWindowController {
         self.app = app
         let w = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 460, height: 400),
                          styleMask: [.titled, .closable], backing: .buffered, defer: false)
-        w.title = "Stage Clock"
+        w.title = "Stage Clock " + (Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "")
         w.isReleasedWhenClosed = false
+        // Follow him to whichever Space he is on, including over a full-screen app.
+        w.collectionBehavior = [.moveToActiveSpace, .fullScreenAuxiliary]
         super.init(window: w)
         build()
         w.center()
@@ -685,8 +707,8 @@ final class SettingsWindowController: NSWindowController {
         sizeSlider.widthAnchor.constraint(equalToConstant: 240).isActive = true
 
         let hint = NSTextField(wrappingLabelWithString:
-            "To get this panel back, open Stage Clock again (⌘Space, type \"stage\", Return) or click the clock in the menu bar. "
-            + "Optional hotkeys: ⌃⌥⌘S start/pause, ⌃⌥⌘H hide.")
+            "Panel gone? Click Stage Clock in the Dock. "
+            + "Optional hotkeys: ⌃⌥⌘S start/pause, ⌃⌥⌘H hide clock.")
         hint.font = NSFont.systemFont(ofSize: 11)
         hint.textColor = .secondaryLabelColor
 
@@ -901,5 +923,5 @@ func drawBackdrop(_ kind: Int, in r: CGRect, ctx: CGContext) {
 let app = NSApplication.shared
 let delegate = AppDelegate()
 app.delegate = delegate
-app.setActivationPolicy(.accessory)
+app.setActivationPolicy(.regular)       // a Dock icon: the one place he can always click to get the panel
 app.run()

@@ -1,10 +1,18 @@
 # Stage Clock
 
-Giant click-through countdown overlay for live talks (menu bar app, macOS 13+, universal).
-Build: `./build.sh` → `build/StageClock.zip`. Ad-hoc signed (no Developer ID cert on jaws-mini),
-so first launch on another Mac: right-click → Open, or `xattr -cr "/Applications/Stage Clock.app"`.
+Giant click-through countdown overlay for live talks (Dock app + menu bar timer, macOS 13+, universal).
+Build: `./build.sh` → `build/StageClock.zip` (icon: `make-icon.swift` → `AppIcon.icns`, committed).
+Ad-hoc signed (no Developer ID cert on jaws-mini), so a browser download is quarantined and macOS 15+
+blocks it (right-click → Open no longer bypasses; System Settings → Privacy & Security → Open Anyway).
+Install that avoids it (curl sets no quarantine):
+`pkill -x StageClock; curl -fsSL https://jaws-mini.daggertooth-uaru.ts.net/public/StageClock-1.2.zip -o /tmp/StageClock.zip && rm -rf "/Applications/Stage Clock.app" && ditto -xk /tmp/StageClock.zip /Applications && open "/Applications/Stage Clock.app"`
 
-Control panel (shows at launch; open the app again or click the menu bar clock to get it back;
+1.2: Dock app (1.1 was menu-bar-only; its menu bar item can sit behind a MacBook notch), newest
+launch quits any older running copy (two copies drew two stacked clocks), panel opens on the
+pointer's display and the current Space (incl. over full-screen apps — not verified), overlay
+survives "Hide Others" (`canHide = false`).
+
+Control panel (shows at launch; click the Dock icon, open the app again, or use the menu bar clock to get it back;
 Start/Pause/Resume, Reset, ±1 min). Settings: minutes, start now or at a set time (a slot already underway joins in progress and still
 ends on time), display, corner, typeface + style (any installed family), size, color, halo
 (None/Fine/Medium/Bold), optional dark plate, chime at 0:00.
