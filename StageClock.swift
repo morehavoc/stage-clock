@@ -413,6 +413,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWind
 
     /// The panel's big button: Start → Pause → Resume. Starting or resuming tucks the panel away.
     @objc func panelPrimary() {
+        settings?.window?.makeFirstResponder(nil)     // finish any edit in progress (minutes, start time) first
         switch state {
         case .idle: start(atTime: Prefs.startAtTime)
         case .scheduled: start(atTime: false)
@@ -596,7 +597,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWind
 
 // MARK: - Settings window
 
-final class SettingsWindowController: NSWindowController {
+final class SettingsWindowController: NSWindowController, NSTextFieldDelegate {
     weak var app: AppDelegate?
     let minutesField = NSTextField()
     let minutesStepper = NSStepper()
@@ -632,9 +633,10 @@ final class SettingsWindowController: NSWindowController {
     }
 
     func build() {
-        let fmt = NumberFormatter(); fmt.minimum = 1; fmt.maximum = 600; fmt.allowsFloats = false
-        minutesField.formatter = fmt
-        minutesField.integerValue = Prefs.minutes
+        // No NumberFormatter: it only commits on Return and can refuse to let go of a half-typed value.
+        // Every keystroke is applied live instead (controlTextDidChange), so typing 45 shows 45:00 at once.
+        minutesField.stringValue = String(Prefs.minutes)
+        minutesField.delegate = self
         minutesField.widthAnchor.constraint(equalToConstant: 60).isActive = true
         minutesField.target = self; minutesField.action = #selector(changed)
         minutesStepper.minValue = 1; minutesStepper.maxValue = 600; minutesStepper.increment = 1
@@ -743,10 +745,29 @@ final class SettingsWindowController: NSWindowController {
     }
 
     @objc func familyChanged() { reloadStyles(preferring: stylePopup.titleOfSelectedItem ?? "Bold"); changed() }
-    @objc func stepped() { minutesField.integerValue = minutesStepper.integerValue; changed() }
+    @objc func stepped() { minutesField.stringValue = String(minutesStepper.integerValue); changed() }
+
+    /// The minutes he has typed so far, if they make a usable countdown (1–600).
+    var typedMinutes: Int? {
+        guard let v = Int(minutesField.stringValue.trimmingCharacters(in: .whitespaces)), v >= 1 else { return nil }
+        return min(v, 600)
+    }
+
+    func controlTextDidChange(_ n: Notification) {
+        guard (n.object as? NSTextField) === minutesField, let v = typedMinutes, v != Prefs.minutes else { return }
+        Prefs.minutes = v
+        minutesStepper.integerValue = v
+        Prefs.stamp += 1
+        app?.tick()
+    }
+
+    func controlTextDidEndEditing(_ n: Notification) {
+        guard (n.object as? NSTextField) === minutesField else { return }
+        minutesField.stringValue = String(Prefs.minutes)      // "0", "" or "abc" falls back to the last good value
+    }
 
     @objc func changed() {
-        Prefs.minutes = max(1, minutesField.integerValue)
+        Prefs.minutes = typedMinutes ?? Prefs.minutes
         minutesStepper.integerValue = Prefs.minutes
         Prefs.startAtTime = startMode.indexOfSelectedItem == 1
         let comps = Calendar.current.dateComponents([.hour, .minute], from: timePicker.dateValue)
@@ -778,8 +799,8 @@ final class SettingsWindowController: NSWindowController {
         }
         if primaryButton.title != t { primaryButton.title = t }
         // ±1 min while idle changes the countdown length; keep the field in step unless he is typing in it.
-        if case .idle = state, minutesField.currentEditor() == nil, minutesField.integerValue != Prefs.minutes {
-            minutesField.integerValue = Prefs.minutes
+        if case .idle = state, minutesField.currentEditor() == nil, minutesField.stringValue != String(Prefs.minutes) {
+            minutesField.stringValue = String(Prefs.minutes)
             minutesStepper.integerValue = Prefs.minutes
         }
     }
