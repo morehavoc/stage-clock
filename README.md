@@ -4,7 +4,8 @@ Giant click-through countdown overlay for live talks (menu bar app, macOS 13+, u
 Build: `./build.sh` → `build/StageClock.zip`. Ad-hoc signed (no Developer ID cert on jaws-mini),
 so first launch on another Mac: right-click → Open, or `xattr -cr "/Applications/Stage Clock.app"`.
 
-Settings: minutes, start now or at a set time (a slot already underway joins in progress and still
+Control panel (shows at launch; open the app again or click the menu bar clock to get it back;
+Start/Pause/Resume, Reset, ±1 min). Settings: minutes, start now or at a set time (a slot already underway joins in progress and still
 ends on time), display, corner, typeface + style (any installed family), size, color, halo
 (None/Fine/Medium/Bold), optional dark plate, chime at 0:00.
 

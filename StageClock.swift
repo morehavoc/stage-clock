@@ -343,6 +343,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWind
             renderSpecimen(to: args[i + 1])
             exit(0)
         }
+        installMainMenu()
         statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
         statusItem.button?.font = NSFont.monospacedDigitSystemFont(ofSize: 13, weight: .semibold)
         let menu = NSMenu()
@@ -375,9 +376,43 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWind
         tick()
     }
 
+    /// Opening the app again (Spotlight, Finder, Launchpad, Dock) while it runs brings the panel back.
+    /// It has no Dock icon, and on a notched MacBook its menu bar item can hide behind the notch.
+    func applicationShouldHandleReopen(_ sender: NSApplication, hasVisibleWindows flag: Bool) -> Bool {
+        openSettings()
+        return false
+    }
+
+    /// Never shown (menu bar app), but it makes ⌘W, ⌘Q and copy/paste work in the panel.
+    func installMainMenu() {
+        let main = NSMenu()
+        func sub(_ title: String, _ items: [(String, Selector, String)]) {
+            let item = NSMenuItem(), menu = NSMenu(title: title)
+            for (t, sel, key) in items { menu.addItem(withTitle: t, action: sel, keyEquivalent: key) }
+            item.submenu = menu
+            main.addItem(item)
+        }
+        sub("Stage Clock", [("Quit Stage Clock", #selector(NSApplication.terminate(_:)), "q")])
+        sub("Edit", [("Cut", #selector(NSText.cut(_:)), "x"), ("Copy", #selector(NSText.copy(_:)), "c"),
+                     ("Paste", #selector(NSText.paste(_:)), "v"), ("Select All", #selector(NSText.selectAll(_:)), "a")])
+        sub("Window", [("Close", #selector(NSWindow.performClose(_:)), "w")])
+        NSApp.mainMenu = main
+    }
+
     // MARK: actions
 
-    @objc func startFromSettings() { start(atTime: Prefs.startAtTime) }
+    /// The panel's big button: Start → Pause → Resume. Starting or resuming tucks the panel away.
+    @objc func panelPrimary() {
+        switch state {
+        case .idle: start(atTime: Prefs.startAtTime)
+        case .scheduled: start(atTime: false)
+        case .running(let end): state = .paused(remaining: end.timeIntervalSinceNow)
+        case .paused(let rem):
+            state = .running(end: Date().addingTimeInterval(rem))
+            settings?.window?.close()
+        }
+        tick()
+    }
 
     func start(atTime: Bool) {
         let duration = TimeInterval(Prefs.minutes * 60)
@@ -493,6 +528,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWind
         }
         if hidden, case .idle = state {} else if hidden { title += " (hidden)" }
         if statusItem.button?.title != title { statusItem.button?.title = title }
+        if settingsOpen { settings?.refresh(state) }
     }
 
     // MARK: menu
@@ -526,7 +562,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWind
         add(hidden ? "Show clock" : "Hide clock", #selector(toggleHidden), "h")
         add("Reset", #selector(reset), "r")
         menu.addItem(.separator())
-        let s = NSMenuItem(title: "Settings…", action: #selector(openSettings), keyEquivalent: ",")
+        let s = NSMenuItem(title: "Control Panel…", action: #selector(openSettings), keyEquivalent: "")
         s.target = self
         menu.addItem(s)
         menu.addItem(NSMenuItem(title: "Quit Stage Clock", action: #selector(NSApplication.terminate(_:)), keyEquivalent: "q"))
@@ -555,6 +591,7 @@ final class SettingsWindowController: NSWindowController {
     let sizeSlider = NSSlider()
     let backingBox = NSButton(checkboxWithTitle: "Dark plate behind the numbers", target: nil, action: nil)
     let chimeBox = NSButton(checkboxWithTitle: "Chime at 0:00", target: nil, action: nil)
+    let primaryButton = NSButton(title: "Start", target: nil, action: nil)
 
     init(app: AppDelegate) {
         self.app = app
@@ -648,14 +685,18 @@ final class SettingsWindowController: NSWindowController {
         sizeSlider.widthAnchor.constraint(equalToConstant: 240).isActive = true
 
         let hint = NSTextField(wrappingLabelWithString:
-            "Hotkeys work from any app: ⌃⌥⌘S start/pause · ⌃⌥⌘R reset · ⌃⌥⌘H hide · ⌃⌥⌘= / ⌃⌥⌘- add/remove a minute.")
+            "To get this panel back, open Stage Clock again (⌘Space, type \"stage\", Return) or click the clock in the menu bar. "
+            + "Optional hotkeys: ⌃⌥⌘S start/pause, ⌃⌥⌘H hide.")
         hint.font = NSFont.systemFont(ofSize: 11)
         hint.textColor = .secondaryLabelColor
 
-        let startButton = NSButton(title: "Start", target: app, action: #selector(AppDelegate.startFromSettings))
-        startButton.keyEquivalent = "\r"
+        primaryButton.target = app; primaryButton.action = #selector(AppDelegate.panelPrimary)
+        primaryButton.keyEquivalent = "\r"
+        let reset = NSButton(title: "Reset", target: app, action: #selector(AppDelegate.reset))
+        let minus = NSButton(title: "−1 min", target: app, action: #selector(AppDelegate.subMinute))
+        let plus = NSButton(title: "+1 min", target: app, action: #selector(AppDelegate.addMinute))
         let quit = NSButton(title: "Quit", target: NSApp, action: #selector(NSApplication.terminate(_:)))
-        let buttons = NSStackView(views: [quit, NSView(), startButton])
+        let buttons = NSStackView(views: [quit, NSView(), reset, minus, plus, primaryButton])
 
         let stack = NSStackView(views: [grid, hint, buttons])
         stack.orientation = .vertical
@@ -703,6 +744,23 @@ final class SettingsWindowController: NSWindowController {
     }
 
     func sync() { timePicker.isEnabled = startMode.indexOfSelectedItem == 1 }
+
+    /// Called on every tick while the panel is open.
+    func refresh(_ state: ClockState) {
+        let t: String
+        switch state {
+        case .idle: t = Prefs.startAtTime ? "Start at set time" : "Start"
+        case .scheduled: t = "Start now"
+        case .running: t = "Pause"
+        case .paused: t = "Resume"
+        }
+        if primaryButton.title != t { primaryButton.title = t }
+        // ±1 min while idle changes the countdown length; keep the field in step unless he is typing in it.
+        if case .idle = state, minutesField.currentEditor() == nil, minutesField.integerValue != Prefs.minutes {
+            minutesField.integerValue = Prefs.minutes
+            minutesStepper.integerValue = Prefs.minutes
+        }
+    }
 }
 
 // MARK: - Specimen sheet (`StageClock --specimen out.png`): every typeface on three backdrops, 2x
