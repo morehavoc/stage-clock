@@ -1,5 +1,5 @@
 // Stage Clock — a giant, click-through countdown overlay for live talks.
-// Menu bar app (no Dock icon). Build: ./build.sh
+// Dock + menu bar app. Build: ./build.sh
 //
 // The digits are drawn as vector glyph outlines (Core Text paths), not through a text field:
 // figures sit in fixed-width cells so nothing shifts as they change, the colon and plus are

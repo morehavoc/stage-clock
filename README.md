@@ -1,25 +1,56 @@
 # Stage Clock
 
-Giant click-through countdown overlay for live talks (Dock app + menu bar timer, macOS 13+, universal).
-Build: `./build.sh` → `build/StageClock.zip` (icon: `make-icon.swift` → `AppIcon.icns`, committed).
-Ad-hoc signed (no Developer ID cert on jaws-mini), so a browser download is quarantined and macOS 15+
-blocks it (right-click → Open no longer bypasses; System Settings → Privacy & Security → Open Anyway).
-Install that avoids it (curl sets no quarantine):
-`pkill -x StageClock; curl -fsSL https://jaws-mini.daggertooth-uaru.ts.net/public/StageClock-1.2.zip -o /tmp/StageClock.zip && rm -rf "/Applications/Stage Clock.app" && ditto -xk /tmp/StageClock.zip /Applications && open "/Applications/Stage Clock.app"`
+A giant countdown clock for live talks. It sits in the corner of your screen, on top of everything, and clicks pass right through it.
 
-1.2: Dock app (1.1 was menu-bar-only; its menu bar item can sit behind a MacBook notch), newest
-launch quits any older running copy (two copies drew two stacked clocks), panel opens on the
-pointer's display and the current Space (incl. over full-screen apps — not verified), overlay
-survives "Hide Others" (`canHide = false`).
+I built it for the talks where I vibe code something in 30 minutes on stage. The audience can see the clock, I can see the clock, and nobody has to wonder how it's going.
 
-Control panel (shows at launch; click the Dock icon, open the app again, or use the menu bar clock to get it back;
-Start/Pause/Resume, Reset, ±1 min). Settings: minutes, start now or at a set time (a slot already underway joins in progress and still
-ends on time), display, corner, typeface + style (any installed family), size, color, halo
-(None/Fine/Medium/Bold), optional dark plate, chime at 0:00.
+![Stage Clock counting down over a code editor and a map](screenshots/clock.png)
 
-Rendering (1.1): digits are Core Text glyph outlines drawn as vector paths, figures centred in
-fixed cells (tabular in any face), colon/plus optically centred on the figure height, baseline
-snapped to the pixel grid, halo = round-joined stroke under the fill. 1.0 used a text field with
-a blurred shadow, a centred stroke (miter spikes) and a fractional offset, which read as fuzzy.
-`StageClock --specimen out.png` renders the typeface sheet; `--test-seconds N` starts at N s. Overtime counts up
-as `+0:12`, flashing. Hotkeys (any app): ⌃⌥⌘S start/pause, ⌃⌥⌘R reset, ⌃⌥⌘H hide, ⌃⌥⌘= / ⌃⌥⌘- ±1 min.
+## What it does
+
+- Big red countdown in any corner, on any display. Transparent, always on top, click-through.
+- Counts into overtime as `+0:12` and flashes, so you know you're over.
+- Start now, or at a set time. If your slot already started, it joins in progress and still ends on time.
+- Pick any installed typeface, size and color. Optional halo or dark plate so it reads over light maps and dark editors alike.
+- Optional chime at 0:00.
+
+The digits are drawn as vector outlines with a crisp halo, not a blurry drop shadow. There are cartographers in these audiences. They will notice.
+
+## Control panel
+
+![Stage Clock control panel](screenshots/panel.png)
+
+It opens at launch. Lost it? Click Stage Clock in the Dock, or the time in the menu bar.
+
+Hotkeys work from any app if you want them:
+
+- `⌃⌥⌘S` start / pause
+- `⌃⌥⌘R` reset
+- `⌃⌥⌘H` hide the clock
+- `⌃⌥⌘=` / `⌃⌥⌘-` add or remove a minute
+
+## Install
+
+Grab `StageClock.zip` from [Releases](https://github.com/morehavoc/stage-clock/releases), unzip and drag **Stage Clock** to Applications. macOS 13 or newer, Apple silicon or Intel.
+
+It isn't notarized, so macOS will block the first launch. Go to **System Settings → Privacy & Security** and click **Open Anyway**. Or skip that with:
+
+```sh
+xattr -dr com.apple.quarantine "/Applications/Stage Clock.app"
+```
+
+## Build it yourself
+
+Needs the Xcode command line tools.
+
+```sh
+./build.sh
+```
+
+That makes a universal `build/Stage Clock.app` and `build/StageClock.zip`. It's one Swift file, no Xcode project.
+
+For testing: `--test-seconds 90` starts a 90 second countdown right away, and `--specimen out.png` renders every typeface over a dark editor, a light editor and a map.
+
+## License
+
+MIT
